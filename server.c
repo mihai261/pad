@@ -27,6 +27,7 @@
 
 #define IP "127.0.0.1"
 #define PORT 8080
+#define BLKSIZE 512
 
 int init_server()
 {
@@ -50,7 +51,7 @@ int init_server()
 		return -1;
 	}
 
-	if ((bind(sd, (struct sockaddr*) &addr, sizeof(struct sockaddr))) != 0)
+	if ((bind(sd, (struct sockaddr*) &addr, sizeof(struct sockaddr_in))) != 0)
 	{
 		perror("bind failed: ");
 		close(sd);
@@ -96,6 +97,12 @@ char* accept_file_request(int socket_fd)
 	if (read(socket_fd, (void*) &header, sizeof(message_header)) == -1)
 	{
 		perror("Error receiving file request header: ");
+		return NULL;
+	}
+
+	if (header.message_type != 'f')
+	{
+		fprintf(stderr, "not file transfer\n");
 		return NULL;
 	}
 
@@ -156,6 +163,69 @@ int check_if_file_exist(int socket_fd, const char* filename)
 	return header.message_size;
 }
 
+int send_file(int socket_fd, const char* filename, uint16_t filesize)
+{
+	uint16_t sent_size = 0;
+	message_header header;
+	char* buffer = NULL;
+	FILE* file = fopen(filename, "r");
+	if (file == NULL)
+	{
+		fprintf(stderr, "n-am putut deschide fisier\n");
+		return -1;
+	}
+
+	// aloc buffer
+	buffer = (char*) calloc(BLKSIZE, sizeof(char));
+	if (buffer == NULL)
+	{
+		errno = ENOMEM;
+		perror("Not enough memory: ");
+		return -1;
+	}
+
+	// trimit fisierul
+	while (sent_size < filesize)
+	{
+		// citesc din fisier
+		ssize_t read_size = fread(buffer, sizeof(char), BLKSIZE, file);
+		if (read_size < BLKSIZE && !feof(file))
+		{
+			// am eroare la stream
+			fclose(file);
+			free(buffer);
+			return -1;
+		}
+		header.message_type = 'f';
+		header.message_size = read_size;
+
+		// scriu header-ul catre client
+		if (write(socket_fd, &header, sizeof(message_header)) == -1)
+		{
+			perror("eroare scriere header: ");
+			fclose(file);
+			free(buffer);
+			return -1;
+		}
+
+		// scriu bufferul catre client
+		if (write(socket_fd, buffer, read_size) == -1)
+		{
+			perror("eroare scriere continut fisier: ");
+			fclose(file);
+			free(buffer);
+			return -1;
+		}
+
+		sent_size += read_size;
+	}
+
+	fclose(file);
+	free(buffer);
+
+	return 0;
+}
+
 int main(int argc, char* argv[])
 {
 
@@ -197,6 +267,10 @@ int main(int argc, char* argv[])
 	else
 	{
 		// file exists, call sending function
+		if (send_file(client_socket_fd, requested_filename, ret_val) == -1)
+		{
+			fprintf(stderr, "File not properly sent.\n");
+		}
 	}
 
 	free(requested_filename);
