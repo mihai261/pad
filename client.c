@@ -5,7 +5,7 @@
  *  4. receive reply from server. does the requested file exist?
  *      - if the file does not exist, a message header with size == 0 is received
  *		- if the file exists, a message header with size == filesize is received
- *  5. if it exists, receive it (not implemented)
+ *  5. if it exists, receive it
  */
 
 
@@ -26,6 +26,7 @@
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
+#define DIVISOR 32
 
 #define PRINT_USAGE()   fprintf(stderr, "Incorrect usage.\n");    \
                         fprintf(stderr, "client FILE\n");
@@ -186,7 +187,7 @@ int receive_file(int socket_fd, const char* filename, size_t filesize)
 
         // read the file segment from the socket into the buffer
         ssize_t read_size = 0;
-        if ((read_size = read(socket_fd, buffer, header.message_size)) == -1)
+        if ((read_size = read(socket_fd, buffer, header.message_size+1)) == -1)
         {
             perror("Error reading file segment from socket");
             fclose(file);
@@ -195,8 +196,24 @@ int receive_file(int socket_fd, const char* filename, size_t filesize)
             return -1;
         }
 
+        //checksum on received segment
+        int checksum = 0;
+		for(int i=0; i<read_size-1; i++){
+			checksum += (int) buffer[i];
+		}
+		checksum = checksum % DIVISOR;
+
+		if(checksum != (int) buffer[read_size-1]){
+            fprintf(stderr, "Wrong checksum!\n");
+            fclose(file);
+            free(buffer);
+            remove(filename_buffer);
+            free(filename_buffer);
+            return -1;
+        }
+        
         // write the file segment in the output file
-        if (fwrite(buffer, sizeof(char), read_size, file) != read_size)
+        if (fwrite(buffer, sizeof(char), read_size-1, file) != read_size-1)
         {
             fprintf(stderr, "Not enough bytes were written in the output file.\n");
             fclose(file);
@@ -206,7 +223,7 @@ int receive_file(int socket_fd, const char* filename, size_t filesize)
         }
 
         // increment number of transferred bytes
-        received_size += read_size;
+        received_size += read_size - 1;
     }
 
     fclose(file);
@@ -254,14 +271,21 @@ int main(int argc, char* argv[])
     }
     else
     {
-        // file exists, proceed with receiving it
-        if (receive_file(socket_fd, requested_filename, filesize) == -1)
-        {
-            fprintf(stderr, "File not transmitted properly.\n");
-        }
-        else
-        {
-            printf("File received!\n");
+        // ask for permission to allocate memory
+        printf("After this operation, %d bytes of additional disk space will be used.\nDo you want to continue? [y/n]", filesize);
+        char response;
+        scanf("%c", &response);
+
+        if(response == 'Y' || response == 'y'){
+            // file exists, proceed with receiving it
+            if (receive_file(socket_fd, requested_filename, filesize) == -1)
+            {
+                fprintf(stderr, "File not transmitted properly.\n");
+            }
+            else
+            {
+                printf("File received!\n");
+            }
         }
     }
 

@@ -6,7 +6,7 @@
  *  5. check if that file exists and reply to the client
  *		- if the file does not exist, a message header with size == 0 is sent
  *		- if the file exists, a message header with size == filesize is sent
- *  6. if it exists, send it (not implemented)
+ *  6. if it exists, send it
  */
 
 
@@ -28,6 +28,7 @@
 #define IP "127.0.0.1"
 #define PORT 8080
 #define BLKSIZE 512
+#define DIVISOR 32
 
 int init_server()
 {
@@ -176,7 +177,7 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 	}
 
 	// aloc buffer
-	buffer = (char*) calloc(BLKSIZE, sizeof(char));
+	buffer = (char*) calloc(BLKSIZE+1, sizeof(char));
 	if (buffer == NULL)
 	{
 		errno = ENOMEM;
@@ -208,8 +209,18 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 			return -1;
 		}
 
+		// checksum on buffer
+		int checksum = 0;
+		for(int i=0; i<read_size; i++){
+			checksum += (int) buffer[i];
+		}
+		checksum = checksum % DIVISOR;
+
+		// append checksum to buffer
+		buffer[read_size] = (char) checksum;
+
 		// scriu bufferul catre client
-		if (write(socket_fd, buffer, read_size) == -1)
+		if (write(socket_fd, buffer, read_size+1) == -1)
 		{
 			perror("eroare scriere continut fisier: ");
 			fclose(file);
@@ -228,53 +239,54 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 
 int main(int argc, char* argv[])
 {
-
+	
 	int socket_fd = init_server();
 	if (socket_fd == -1)
 	{
 		exit(EXIT_FAILURE);
 	}
+	while(1){
+		int client_socket_fd = await_client_connection(socket_fd);
+		if (client_socket_fd == -1)
+		{
+			exit(EXIT_FAILURE);
+		}
 
-	int client_socket_fd = await_client_connection(socket_fd);
-	if (client_socket_fd == -1)
-	{
-		exit(EXIT_FAILURE);
-	}
+		// see what file the client needs
+		char* requested_filename = accept_file_request(client_socket_fd);
+		if (requested_filename == NULL)
+		{
+			close(client_socket_fd);
+			close(socket_fd);
+			exit(EXIT_FAILURE);
+		}
 
-	// see what file the client needs
-	char* requested_filename = accept_file_request(client_socket_fd);
-	if (requested_filename == NULL)
-	{
-		close(client_socket_fd);
-		close(socket_fd);
-		exit(EXIT_FAILURE);
-	}
+		printf("requested file: %s\n", requested_filename);
 
-	printf("requested file: %s\n", requested_filename);
+		int ret_val = check_if_file_exist(client_socket_fd, requested_filename);
+		if (ret_val == -1)
+		{
+			free(requested_filename);
+			close(client_socket_fd);
+			close(socket_fd);
+			exit(EXIT_FAILURE);
+		}
+		if (ret_val == 0)
+		{
+			// file does not exist, do nothing?
+		}
+		else
+		{
+			// file exists, call sending function
+			if (send_file(client_socket_fd, requested_filename, ret_val) == -1)
+			{
+				fprintf(stderr, "File not properly sent.\n");
+			}
+		}
 
-	int ret_val = check_if_file_exist(client_socket_fd, requested_filename);
-	if (ret_val == -1)
-	{
 		free(requested_filename);
 		close(client_socket_fd);
-		close(socket_fd);
-		exit(EXIT_FAILURE);
 	}
-	if (ret_val == 0)
-	{
-		// file does not exist, do nothing?
-	}
-	else
-	{
-		// file exists, call sending function
-		if (send_file(client_socket_fd, requested_filename, ret_val) == -1)
-		{
-			fprintf(stderr, "File not properly sent.\n");
-		}
-	}
-
-	free(requested_filename);
-	close(client_socket_fd);
 	close(socket_fd);
 	return 0;
 }
