@@ -2,11 +2,14 @@
  * 	1. create socket
  *	2. bind and start listening
  *  3. accept connection
- *	4. wait for client to ask u for a file
+ *	4. wait for client to ask you for a file
+ *		- check if the request has the leading 'f'
+ *		- check if the memory needed for the file name is adequate
  *  5. check if that file exists and reply to the client
  *		- if the file does not exist, a message header with size == 0 is sent
  *		- if the file exists, a message header with size == filesize is sent
  *  6. if it exists, send it
+ * 		- compute checksum for each segment and attach it to the payload
  */
 
 
@@ -28,8 +31,13 @@
 #define IP "127.0.0.1"
 #define PORT 8080
 #define BLKSIZE 512
+#define MAX_ALLOCATION_SIZE 1024
 #define DIVISOR 32
 
+/*
+ *	Creates a socket for the server and binds its IP and port.
+ *	Returns the socket file descriptor on success, -1 on error.
+ */
 int init_server()
 {
 	// sockaddr_in is used for ipv4 sockets
@@ -43,6 +51,8 @@ int init_server()
 		return -1;
 	}
 
+	// set server ip address and port
+	// need to convert these values from strings/ints to addresses in network byte order
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(PORT);
 	if(inet_aton(IP, &addr.sin_addr) == 0)
@@ -62,35 +72,50 @@ int init_server()
 	return sd;
 }
 
+/*
+ *	Listens for inbound client connections.
+ *	Returns the socket file descriptor for the first client that connects to the server,
+ *  	or -1 on error.
+ */
 int await_client_connection(int socket_fd)
 {
 	struct sockaddr_in client_addr;
 	bzero(&client_addr, sizeof(struct sockaddr_in));
 
-	// starting the listening process for inbound connections
+	// start the listening process for inbound connections
 	if (listen(socket_fd, 5) == -1)
 	{
-		perror("error starting the listening: ");
+		perror("Error starting the listening");
 		close(socket_fd);
 		return -1;
 	}
 
-	printf("waiting...\n");
+	printf("Waiting...\n");
 
+	// accept client connections
 	socklen_t client_addr_len = sizeof(client_addr_len);
 	int csd; // < client socket descriptor
 	csd = accept(socket_fd, (struct sockaddr*) &client_addr, &client_addr_len);
 	if (csd == -1)
 	{
-		perror("error establishing connection");
+		perror("Error establishing connection");
 		close(socket_fd);
 		return -1;
 	}
-	printf("connection established!\n");
+	printf("Connection established!\n");
 
+	// return the client socket file descriptor to the caller
 	return csd;
 }
 
+/*
+ *	Reads the client request.
+ *	Only acknowledges file transfer requests (first byte 'f'),
+ *		with file name less than MAX_ALLOCATION_SIZE bytes,
+ * 		to protect against unwanted requests and 
+ * 		memory overflows in the server.
+ * 	Returns a string with the name of the requested file on success, NULL on error.
+ */
 char* accept_file_request(int socket_fd)
 {
 	// read header
@@ -101,9 +126,17 @@ char* accept_file_request(int socket_fd)
 		return NULL;
 	}
 
+	// check if the request is for file transferring
 	if (header.message_type != 'f')
 	{
-		fprintf(stderr, "not file transfer\n");
+		fprintf(stderr, "Request not for file transfer.\n");
+		return NULL;
+	}
+
+	// block requests with abnormally large file name sizes to protect the server machine from attacks
+	if (header.message_size > MAX_ALLOCATION_SIZE)
+	{
+		fprintf(stderr, "Message size larger than allowed threshold.\n");
 		return NULL;
 	}
 
@@ -126,13 +159,18 @@ char* accept_file_request(int socket_fd)
 	return filename;
 }
 
+/*
+ *	Check if the requested file exists locally and inform the client.
+ * 	Returns -1 on error, 0 if the file does not exist,
+ * 		and the size of the file in bytes, if it exists.
+ */
 int check_if_file_exist(int socket_fd, const char* filename)
 {
 	message_header header;
 	header.message_type = 'f';
 
 	// checking if file exists with stat instead of access because we'll use
-	// st_size afterwards
+	// the st_size member of the struct afterwards
 	struct stat statbuf;
 	int status = stat(filename, &statbuf);
 	if (status == -1 && errno == ENOENT)
@@ -156,6 +194,7 @@ int check_if_file_exist(int socket_fd, const char* filename)
 		header.message_size = statbuf.st_size;
 	}
 
+	// send the 'initial reply' header to the client
 	if (write(socket_fd, (void*) &header, sizeof(message_header)) == -1)
 	{
 		perror("Error informing client: ");
@@ -164,35 +203,44 @@ int check_if_file_exist(int socket_fd, const char* filename)
 	return header.message_size;
 }
 
-int send_file(int socket_fd, const char* filename, uint16_t filesize)
+/*
+ *	Sends the file to the client
+ *	The file will be sent in BLKSIZE bytes wide segments.
+ * 	For each segment, a checksum will be attached to the payload.
+ *  Message format: <header><payload><1 byte checksum>.
+ *	Returns 0 on success and -1 on error.
+ */
+int send_file(int socket_fd, const char* filename, uint32_t filesize)
 {
-	uint16_t sent_size = 0;
+	uint32_t sent_size = 0;
 	message_header header;
 	char* buffer = NULL;
+
+	// open the requested file
 	FILE* file = fopen(filename, "r");
 	if (file == NULL)
 	{
-		fprintf(stderr, "n-am putut deschide fisier\n");
+		fprintf(stderr, "Could not open requested file.\n");
 		return -1;
 	}
 
-	// aloc buffer
+	// allocate the output buffer
 	buffer = (char*) calloc(BLKSIZE+1, sizeof(char));
 	if (buffer == NULL)
 	{
 		errno = ENOMEM;
-		perror("Not enough memory: ");
+		perror("Not enough memory for output buffer: ");
 		return -1;
 	}
 
-	// trimit fisierul
+	// send the file in blocks
 	while (sent_size < filesize)
 	{
-		// citesc din fisier
+		// read a block from the file
 		ssize_t read_size = fread(buffer, sizeof(char), BLKSIZE, file);
 		if (read_size < BLKSIZE && !feof(file))
 		{
-			// am eroare la stream
+			// filestream error
 			fclose(file);
 			free(buffer);
 			return -1;
@@ -200,7 +248,7 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 		header.message_type = 'f';
 		header.message_size = read_size;
 
-		// scriu header-ul catre client
+		// send the message header to the client
 		if (write(socket_fd, &header, sizeof(message_header)) == -1)
 		{
 			perror("eroare scriere header: ");
@@ -209,7 +257,7 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 			return -1;
 		}
 
-		// checksum on buffer
+		// compute checksum for the current block
 		int checksum = 0;
 		for(int i=0; i<read_size; i++){
 			checksum += (int) buffer[i];
@@ -219,7 +267,7 @@ int send_file(int socket_fd, const char* filename, uint16_t filesize)
 		// append checksum to buffer
 		buffer[read_size] = (char) checksum;
 
-		// scriu bufferul catre client
+		// send the buffer to the client
 		if (write(socket_fd, buffer, read_size+1) == -1)
 		{
 			perror("eroare scriere continut fisier: ");
@@ -245,6 +293,7 @@ int main(int argc, char* argv[])
 	{
 		exit(EXIT_FAILURE);
 	}
+
 	while(1){
 		int client_socket_fd = await_client_connection(socket_fd);
 		if (client_socket_fd == -1)
@@ -261,7 +310,7 @@ int main(int argc, char* argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		printf("requested file: %s\n", requested_filename);
+		printf("Requested file: %s\n", requested_filename);
 
 		int ret_val = check_if_file_exist(client_socket_fd, requested_filename);
 		if (ret_val == -1)

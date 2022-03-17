@@ -11,5 +11,5 @@
 typedef struct
 {
     char message_type;
-    uint16_t message_size;
+    uint32_t message_size;
 } message_header;

@@ -3,9 +3,11 @@
  *  2. connect to server
  *  3. ask for a file
  *  4. receive reply from server. does the requested file exist?
+ *      - if the reply does not have the leading 'f', ignore it and exit
  *      - if the file does not exist, a message header with size == 0 is received
  *		- if the file exists, a message header with size == filesize is received
  *  5. if it exists, receive it
+ *      - check the checksum for each segment. If it does not match, delete the output file and exit.
  */
 
 
@@ -130,7 +132,8 @@ int await_initial_server_reply(int socket_fd)
 
 /*
  * Receives the file segments from the socket and copies them in an output file
- * 
+ * Message format: <header><payload><1 byte checksum>.
+ * Returns 0 on success, -1 on error.
  */
 int receive_file(int socket_fd, const char* filename, size_t filesize)
 {
@@ -196,13 +199,14 @@ int receive_file(int socket_fd, const char* filename, size_t filesize)
             return -1;
         }
 
-        //checksum on received segment
+        // compute the checksum on the received segment
         int checksum = 0;
 		for(int i=0; i<read_size-1; i++){
 			checksum += (int) buffer[i];
 		}
 		checksum = checksum % DIVISOR;
 
+        // check your checksum against the received one
 		if(checksum != (int) buffer[read_size-1]){
             fprintf(stderr, "Wrong checksum!\n");
             fclose(file);
@@ -218,6 +222,7 @@ int receive_file(int socket_fd, const char* filename, size_t filesize)
             fprintf(stderr, "Not enough bytes were written in the output file.\n");
             fclose(file);
             free(buffer);
+            remove(filename_buffer);
             free(filename_buffer);
             return -1;
         }
