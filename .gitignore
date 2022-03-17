@@ -1,0 +1,6 @@
+*.gch
+*.o
+.vscode
+*.txt
+*.png
+*.jpg
